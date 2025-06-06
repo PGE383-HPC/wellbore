@@ -85,24 +85,29 @@ end
 # DOMAIN AND INTEGRATION SETUP
 # ============================================================================
 # Set up integration degree for numerical quadrature
-degree = 2  # Quadrature order
+degree_u = 4  # Quadrature order for displacements
+degree_s = 2  # Quadrature order for scalar fields
 
 # Create triangulation and integration measures
 Ω = Triangulation(model)           # Domain triangulation
-dΩ = Measure(Ω, degree)            # Volume integration measure
-Γ = BoundaryTriangulation(model)   # Boundary triangulation
-dΓ = Measure(Γ, degree)            # Boundary integration measure
+dΩ_u = Measure(Ω, degree_u)        # Volume integration measure (for displacements)
+dΩ_s = Measure(Ω, degree_s)        # Volume integration measure (for all other scalar fields)
+
+# Create special measure for the top boundary where traction is applied
+Γ_top = BoundaryTriangulation(model, tags="top")  # Extract top boundary
+dΓ_top_u = Measure(Γ_top, degree_u) # Integration measure for top boundary (for displacements)
+dΓ_top_s = Measure(Γ_top, degree_s) # Integration measure for top boundary (for scalars)
 
 # ============================================================================
 # FINITE ELEMENT SPACES
 # ============================================================================
 # Define polynomial orders for the mixed formulation
 order_u = 2  # P2 (quadratic) elements for displacement
-order_p = 1  # P1 (linear) elements for pressure - satisfies LBB condition
+order_s = 1  # P1 (linear) elements for scalars - satisfies LBB condition
 
 # Create reference finite elements
 reffe_u = ReferenceFE(lagrangian, VectorValue{2,Float64}, order_u)  # Vector-valued for displacement
-reffe_p = ReferenceFE(lagrangian, Float64, order_p)                 # Scalar-valued for pressure
+reffe_s = ReferenceFE(lagrangian, Float64, order_s)                 # Scalar-valued for scalars 
 
 # ============================================================================
 # BOUNDARY CONDITIONS
@@ -113,15 +118,16 @@ reffe_p = ReferenceFE(lagrangian, Float64, order_p)                 # Scalar-val
 u = TrialFESpace(δu, x -> VectorValue(0.0, 0.0))  # Zero displacement at bottom boundary
 
 # Pressure space with Dirichlet BC on left and right sides (drained boundaries)
-δp = TestFESpace(model, reffe_p, conformity=:H1, dirichlet_tags=["left", "right"])
+δp = TestFESpace(model, reffe_s, conformity=:H1, dirichlet_tags=["left", "right"])
 p = TrialFESpace(δp, 0.0)  # Zero pressure at left and right boundaries
+
+# Lagrange multiplier field
+δλ = TestFESpace(Γ_top, reffe_s, conformity=:L2, dirichlet_tags=["left", "right"])
+λ = TrialFESpace(δλ, 0.0)  # Zero pressure at left and right boundaries
 
 # Create multi-field space for the coupled problem
 Y = MultiFieldFESpace([δu, δp])  # Combined test space for displacement and pressure
 
-# Create special measure for the top boundary where traction is applied
-Γ_top = BoundaryTriangulation(model, tags="top")  # Extract top boundary
-dΓ_top = Measure(Γ_top, degree)                   # Integration measure for top boundary
 
 
 # ============================================================================
@@ -175,6 +181,27 @@ p_t = TransientTrialFESpace(δp)  # Transient pressure space
 # Combine the transient spaces into a multi-field space
 X_t = MultiFieldFESpace([u_t, p_t])
 
+function res_Ω(t, (u, p), (δu, δp)) 
+  ∫(
+    # Volume terms (poroelasticity equations)
+    symmetric_gradient(δu) ⊙ sigma(u) -
+    (B * divergence(δu) * p) +
+    δp * (1/M) * ∂t(p) +
+    ∇(δp) ⋅ (k_mu * ∇(p)) +
+    δp * B * divergence(∂t(u))
+   ) * dΩ 
+end
+
+function res_Γ(t, (u, λ), (δu, δλ)) 
+  ∫(
+    # Lagrange multiplier terms for u_y = constant on top boundary
+    λ * ∇(δu ⋅ VectorValue(0.0, 1.0)) ⋅ VectorValue(1.0, 0.0) +
+    δλ * ∇(u ⋅ VectorValue(0.0, 1.0)) ⋅ VectorValue(1.0, 0.0)
+   ) * dΓ_top -
+  ∫(
+    δu ⋅ VectorValue(0.0, -F)  # Compressive traction
+   ) * dΓ_top
+end
 
 # ============================================================================
 # WEAK FORM
@@ -204,7 +231,7 @@ l(t, (δu,δp)) = ∫(
 ) * dΓ_top 
 
 # Residual form for the nonlinear solver
-res(t, (u,p), (δu,δp)) = a(t, (u,p), (δu,δp)) - l(t, (δu,δp))
+res(t, (u, p, λ), (δu, δp, δλ)) = res_Ω(t, (u, p), (δu, δp)) + res_Γ(t, (u, λ), (δu, δλ))
 
 # ============================================================================
 # TRANSIENT PROBLEM SETUP
