@@ -96,7 +96,6 @@ dΩ_s = Measure(Ω, degree_s)        # Volume integration measure (for all other
 # Create special measure for the top boundary where traction is applied
 Γ_top = BoundaryTriangulation(model, tags="top")  # Extract top boundary
 dΓ_top_u = Measure(Γ_top, degree_u) # Integration measure for top boundary (for displacements)
-dΓ_top_s = Measure(Γ_top, degree_s) # Integration measure for top boundary (for scalars)
 
 # ============================================================================
 # FINITE ELEMENT SPACES
@@ -114,21 +113,20 @@ reffe_s = ReferenceFE(lagrangian, Float64, order_s)                 # Scalar-val
 # ============================================================================
 # Displacement space with Dirichlet BC on bottom (fixed in y-direction)
 δu = TestFESpace(model, reffe_u, conformity=:H1, 
-                 dirichlet_tags=["bottom"])
-u = TrialFESpace(δu, x -> VectorValue(0.0, 0.0))  # Zero displacement at bottom boundary
+                 dirichlet_tags=["left", "bottom"], 
+                 dirichlet_masks=[(true, false), (false, true)])
+u = TrialFESpace(δu, _ -> VectorValue(0.0, 0.0))  # Zero displacement at bottom boundary
 
 # Pressure space with Dirichlet BC on left and right sides (drained boundaries)
 δp = TestFESpace(model, reffe_s, conformity=:H1, dirichlet_tags=["left", "right"])
 p = TrialFESpace(δp, 0.0)  # Zero pressure at left and right boundaries
 
 # Lagrange multiplier field
-δλ = TestFESpace(Γ_top, reffe_s, conformity=:L2, dirichlet_tags=["left", "right"])
-λ = TrialFESpace(δλ, 0.0)  # Zero pressure at left and right boundaries
+δλ = TestFESpace(Γ_top, reffe_s, conformity=:L2)
+λ = TrialFESpace(δλ)  
 
 # Create multi-field space for the coupled problem
-Y = MultiFieldFESpace([δu, δp])  # Combined test space for displacement and pressure
-
-
+Y = MultiFieldFESpace([δu, δp, δλ])  # Combined test space for displacement and pressure
 
 # ============================================================================
 # CONSTITUTIVE EQUATIONS
@@ -168,6 +166,7 @@ end
 # Define initial conditions for the problem
 u0 = VectorValue(0.0, 0.0)  # Zero initial displacement
 p0 = 0.0                    # Zero initial pressure
+λ0 = 0.0                    # Zero initial Lagrange Multiplier 
 
 # ============================================================================
 # TRANSIENT TRIAL SPACES
@@ -177,19 +176,23 @@ p0 = 0.0                    # Zero initial pressure
 # but we still need to use TransientTrialFESpace for the time integration
 u_t = TransientTrialFESpace(δu)  # Transient displacement space
 p_t = TransientTrialFESpace(δp)  # Transient pressure space
+λ_t = TransientTrialFESpace(δλ)  # Transient Lagrange multiplier space
 
 # Combine the transient spaces into a multi-field space
-X_t = MultiFieldFESpace([u_t, p_t])
+X_t = MultiFieldFESpace([u_t, p_t, λ_t])
+
 
 function res_Ω(t, (u, p), (δu, δp)) 
-  ∫(
-    # Volume terms (poroelasticity equations)
-    symmetric_gradient(δu) ⊙ sigma(u) -
-    (B * divergence(δu) * p) +
-    δp * (1/M) * ∂t(p) +
-    ∇(δp) ⋅ (k_mu * ∇(p)) +
-    δp * B * divergence(∂t(u))
-   ) * dΩ 
+  # Volume terms (poroelasticity equations)
+  ∫( # order 4 integration terms
+    symmetric_gradient(δu) ⊙ sigma(u) +
+    δp * B * divergence(∂t(u)) - 
+    (B * divergence(δu) * p)
+   ) * dΩ_u +
+  ∫( # order 2 integration terms
+    δp * (1/M) * ∂t(p) -
+    ∇(δp) ⋅ (k_mu * ∇(p))
+   ) * dΩ_s
 end
 
 function res_Γ(t, (u, λ), (δu, δλ)) 
@@ -197,38 +200,12 @@ function res_Γ(t, (u, λ), (δu, δλ))
     # Lagrange multiplier terms for u_y = constant on top boundary
     λ * ∇(δu ⋅ VectorValue(0.0, 1.0)) ⋅ VectorValue(1.0, 0.0) +
     δλ * ∇(u ⋅ VectorValue(0.0, 1.0)) ⋅ VectorValue(1.0, 0.0)
-   ) * dΓ_top -
+   ) * dΓ_top_u -
   ∫(
     δu ⋅ VectorValue(0.0, -F)  # Compressive traction
-   ) * dΓ_top
+   ) * dΓ_top_u
 end
 
-# ============================================================================
-# WEAK FORM
-# ============================================================================
-# Bilinear form a(u,p,δu,δp) - represents the weak form of the PDE system
-a(t, (u,p), (δu,δp)) = ∫( 
-    # Solid mechanics term: stress-strain relationship
-    symmetric_gradient(δu) ⊙ sigma(u) - 
-    
-    # Coupling term 1: effect of fluid pressure on solid (Biot coupling)
-    (B * divergence(δu) * p) +
-    
-    # Fluid storage term: time derivative of pressure
-    δp * (1/M) * ∂t(p) + 
-    
-    # Fluid diffusion term: Darcy's law
-    ∇(δp) ⋅ (k_mu * ∇(p)) +
-    
-    # Coupling term 2: effect of solid deformation on fluid (Biot coupling)
-    δp * B * divergence(∂t(u)) 
-) * dΩ
-
-# Linear form l(δu,δp) - represents external forces/sources
-l(t, (δu,δp)) = ∫( 
-    # Traction force applied at the top boundary
-    δu ⋅ VectorValue(0.0, -F)  # Negative F for compression in y-direction
-) * dΓ_top 
 
 # Residual form for the nonlinear solver
 res(t, (u, p, λ), (δu, δp, δλ)) = res_Ω(t, (u, p), (δu, δp)) + res_Γ(t, (u, λ), (δu, δλ))
@@ -258,7 +235,7 @@ ode_solver = ThetaMethod(nls, Δt, θ)
 # INITIAL SOLUTION
 # ============================================================================
 # Interpolate the initial conditions onto the FE spaces
-uh0 = interpolate_everywhere([u0, p0], X_t(0.0))
+uh0 = interpolate_everywhere([u0, p0, λ0], X_t(0.0))
 
 # ============================================================================
 # SOLVE THE TRANSIENT PROBLEM
@@ -277,7 +254,7 @@ sol = solve(ode_solver, op, t0, tF, uh0)
 # Create ParaView collection (.pvd file) for time-series visualization
 createpvd(joinpath(output_dir, "results")) do pvd
     # Save initial state (t=0)
-    u0_h, p0_h = uh0  # Extract displacement and pressure from initial solution
+    u0_h, p0_h, λ0_h = uh0  # Extract displacement and pressure from initial solution
     pvd[0.0] = createvtk(Ω, joinpath(output_dir, "results_0.vtu"), 
                          cellfields=["displacement"=>u0_h, "pressure"=>p0_h])
     
@@ -286,7 +263,7 @@ createpvd(joinpath(output_dir, "results")) do pvd
         println("Writing results for t = $tn")
         
         # Extract displacement and pressure from current solution
-        un_h, pn_h = uhn
+        un_h, pn_h, λn_h = uhn
         
         # Create VTK file for this time step with displacement and pressure fields
         pvd[tn] = createvtk(Ω, joinpath(output_dir, "results_$(tn).vtu"), 
