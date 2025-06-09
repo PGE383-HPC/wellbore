@@ -1,5 +1,6 @@
 # Import necessary libraries
 using Gridap                # Main Gridap package for finite element analysis
+using Gridap.Arrays         # For Table datastructure
 using Gridap.Geometry       # For mesh and geometry handling
 using Gridap.FESpaces       # For finite element spaces
 using Gridap.MultiField     # For coupled multi-physics problems
@@ -17,8 +18,7 @@ using GridapGmsh            # For Gmsh mesh integration
 # This is a plane strain poroelasticity formulation
 # In plane strain, we assume εzz = 0 (no strain in z-direction)
 # but σzz ≠ 0 (stress in z-direction can exist)
-# This is appropriate for modeling soil/rock layers where the z-dimension is 
-# constrained but stresses can develop in that direction
+# Appropriate for modeling soil/rock layers where z-dimension is constrained
 
 # ============================================================================
 # SIMULATION PARAMETERS
@@ -27,13 +27,13 @@ using GridapGmsh            # For Gmsh mesh integration
 # Material properties
 E = 1.0e6         # Young's modulus (Pa)
 nu = 0.2          # Poisson's ratio
-B = 0.8           # Biot coefficient (coupling between fluid pressure and solid stress)
-M = 1.0e9         # Biot modulus (Pa) - related to fluid and solid compressibility
-k = 1.0e-3        # Permeability (m^2) - how easily fluid flows through the medium
+B = 0.8           # Biot coefficient
+M = 1.0e9         # Biot modulus (Pa)
+k = 1.0e-3        # Permeability (m^2)
 mu = 1.0e-3       # Fluid viscosity (Pa·s)
 
 # Loading conditions
-F = 1.0e3         # Compressive traction (Pa) applied at the top boundary
+F = 1.0e3         # Compressive traction (Pa) at top boundary
 
 # Time stepping parameters
 T = 10.0          # Final time (s)
@@ -43,39 +43,30 @@ dt = T / num_steps # Time step size (s)
 # ============================================================================
 # DERIVED MATERIAL PROPERTIES
 # ============================================================================
-# Calculate Lamé parameters for plane strain formulation
-# For plane strain, we use the same Lamé parameters as in 3D
+# Calculate Lamé parameters for plane strain
 lambda = E * nu / ((1 + nu) * (1 - 2 * nu))  # First Lamé parameter (Pa)
-mu = E / (2 * (1 + nu))                      # Second Lamé parameter (shear modulus) (Pa)
-k_mu = k / mu                                # Hydraulic conductivity (permeability/viscosity)
-
-# Note: The plane strain modulus (E') can be calculated as:
-# E_plane_strain = E / (1 - nu^2)
-# But we'll use lambda and mu directly in our formulation as they appear
-# directly in the stress-strain relationship
+mu_shear = E / (2 * (1 + nu))                # Second Lamé parameter (Pa)
+k_mu = k / mu                                # Hydraulic conductivity
 
 # ============================================================================
 # SETUP OUTPUT AND MESH
 # ============================================================================
-# Create output directory if it doesn't exist
+# Create output directory
 output_dir = "results"
 if !isdir(output_dir)
     mkdir(output_dir)
 end
 
-# Load the Gmsh mesh from file
-# The mesh should be a square domain with properly tagged boundaries
+# Load Gmsh mesh
 model = GmshDiscreteModel("square.msh")
 
-# Define boundary tags for applying boundary conditions
-# These tags should match the physical groups defined in the Gmsh file
+# Define boundary tags
 dirichlet_tags = ["top", "bottom", "left", "right"]
 
-# Export the mesh for visualization
-writevtk(model, "model")  # Save model for visualization in ParaView
+# Export mesh for visualization
+writevtk(model, "model")
 
-# Print information about boundary entities for debugging
-# This helps verify that boundary conditions will be applied to the correct entities
+# Verify boundary entities
 labels = get_face_labeling(model)
 for tag in dirichlet_tags
     println("Entities tagged as $tag: ", findall(labels.tag_to_name .== tag))
@@ -84,136 +75,109 @@ end
 # ============================================================================
 # DOMAIN AND INTEGRATION SETUP
 # ============================================================================
-# Set up integration degree for numerical quadrature
-degree_u = 4  # Quadrature order for displacements
-degree_s = 2  # Quadrature order for scalar fields
+# Integration degrees
+degree_u = 4  # For displacements
+degree_s = 2  # For scalar fields
 
-# Create triangulation and integration measures
-Ω = Triangulation(model)           # Domain triangulation
-dΩ_u = Measure(Ω, degree_u)        # Volume integration measure (for displacements)
-dΩ_s = Measure(Ω, degree_s)        # Volume integration measure (for all other scalar fields)
+# Triangulation and measures
+Ω = Triangulation(model)
+dΩ_u = Measure(Ω, degree_u)
+dΩ_s = Measure(Ω, degree_s)
 
-# Create special measure for the top boundary where traction is applied
-Γ_top = BoundaryTriangulation(model, tags="top")  # Extract top boundary
-dΓ_top_u = Measure(Γ_top, degree_u) # Integration measure for top boundary (for displacements)
+# Top boundary for traction
+Γ_top = BoundaryTriangulation(model, tags="top")
+dΓ_top_u = Measure(Γ_top, degree_u)
 
 # ============================================================================
 # FINITE ELEMENT SPACES
 # ============================================================================
-# Define polynomial orders for the mixed formulation
-order_u = 2  # P2 (quadratic) elements for displacement
-order_s = 1  # P1 (linear) elements for scalars - satisfies LBB condition
+# Polynomial orders
+order_u = 2  # P2 for displacement
+order_s = 1  # P1 for scalars (LBB condition)
 
-# Create reference finite elements
-reffe_u = ReferenceFE(lagrangian, VectorValue{2,Float64}, order_u)  # Vector-valued for displacement
-reffe_s = ReferenceFE(lagrangian, Float64, order_s)                 # Scalar-valued for scalars 
+# Reference finite elements
+reffe_u = ReferenceFE(lagrangian, VectorValue{2,Float64}, order_u)
+reffe_s = ReferenceFE(lagrangian, Float64, order_s)
 
-# ============================================================================
-# BOUNDARY CONDITIONS
-# ============================================================================
-# Displacement space with Dirichlet BC on bottom (fixed in y-direction)
-δu = TestFESpace(model, reffe_u, conformity=:H1, 
-                 dirichlet_tags=["left", "bottom"], 
-                 dirichlet_masks=[(true, false), (false, true)])
-u = TrialFESpace(δu, _ -> VectorValue(0.0, 0.0))  # Zero displacement at bottom boundary
+# Base displacement space (no Dirichlet conditions yet)
+δu_base = TestFESpace(model, reffe_u, conformity=:H1,
+                      dirichlet_tags=["left", "bottom"],
+                      dirichlet_masks=[(true, false), (false, true)])
 
-# Pressure space with Dirichlet BC on left and right sides (drained boundaries)
+# Top boundary node IDs for constraint
+cell_node_ids = get_cell_node_ids(Γ_top)
+boundary_node_ids = sort(unique(vcat(cell_node_ids...)))
+master_dof = 2 * boundary_node_ids[1]  # u_y of first node
+slave_dofs = [2*j for j in boundary_node_ids[2:end]]  # u_y of other nodes
+
+# Constraint setup
+if length(slave_dofs) == 0
+    # No constraints needed if only one node
+    δu = δu_base
+else
+    # Define constraints: each slave DOF equals master_dof
+    data_dofs = [master_dof for _ in slave_dofs]
+    ptrs_dofs = collect(1:length(slave_dofs)+1)
+    sDOF_to_dofs = Table(data_dofs, ptrs_dofs)
+    data_coeffs = [1.0 for _ in slave_dofs]
+    ptrs_coeffs = collect(1:length(slave_dofs)+1)
+    sDOF_to_coeffs = Table(data_coeffs, ptrs_coeffs)
+    sDOF_to_dof = Int[]  # Empty, using sDOF_to_dofs instead
+
+    # Constrained space
+    δu = FESpaceWithLinearConstraints(sDOF_to_dof, sDOF_to_dofs, sDOF_to_coeffs, δu_base)
+end
+
+u = TrialFESpace(δu, _ -> VectorValue(0.0, 0.0))
+
+# Pressure space
 δp = TestFESpace(model, reffe_s, conformity=:H1, dirichlet_tags=["left", "right"])
-p = TrialFESpace(δp, 0.0)  # Zero pressure at left and right boundaries
+p = TrialFESpace(δp, 0.0)
 
-# Lagrange multiplier field
-δλ = TestFESpace(Γ_top, reffe_s, conformity=:L2)
-λ = TrialFESpace(δλ)  
-
-# Create multi-field space for the coupled problem
-Y = MultiFieldFESpace([δu, δp, δλ])  # Combined test space for displacement and pressure
-
-# ============================================================================
-# CONSTITUTIVE EQUATIONS
-# ============================================================================
-# Function to calculate the in-plane stress tensor (σxx, σxy, σyx, σyy)
-function sigma(u)
-    # In plane strain, εzz = 0 but σzz ≠ 0
-    # Calculate the strain tensor from displacement gradient
-    ε = symmetric_gradient(u)  # ε = (∇u + (∇u)ᵀ)/2
-    
-    # Identity tensor in 2D
-    I = TensorValue(1.0, 0.0, 0.0, 1.0)
-    
-    # Plane strain stress-strain relationship
-    # For plane strain, the constitutive equation is the same as 3D
-    # but with the constraint that εzz = 0
-    # The 2D stress tensor is: σ = λ tr(ε) I + 2μ ε
-    # where tr(ε) = εxx + εyy (since εzz = 0)
-    # This returns the 2x2 stress tensor containing σxx, σxy, σyx, σyy
-    return lambda * tr(ε) * I + 2 * mu * ε
-end
-
-# Function to calculate out-of-plane stress (σzz) for visualization
-# This is needed because in plane strain, σzz is non-zero even though εzz = 0
-function sigma_zz(u)
-    # Calculate the strain tensor
-    ε = symmetric_gradient(u)
-    
-    # In plane strain: σzz = λ(εxx + εyy) = λ·tr(ε)
-    # This is derived from the 3D constitutive equation with εzz = 0
-    return lambda * tr(ε)
-end
-
-# ============================================================================
-# INITIAL CONDITIONS
-# ============================================================================
-# Define initial conditions for the problem
-u0 = VectorValue(0.0, 0.0)  # Zero initial displacement
-p0 = 0.0                    # Zero initial pressure
-λ0 = 0.0                    # Zero initial Lagrange Multiplier 
+# Multi-field space
+Y = MultiFieldFESpace([δu, δp])
 
 # ============================================================================
 # TRANSIENT TRIAL SPACES
 # ============================================================================
-# Create transient trial spaces for time-dependent problem
-# For this problem, our boundary conditions don't change with time,
-# but we still need to use TransientTrialFESpace for the time integration
-u_t = TransientTrialFESpace(δu)  # Transient displacement space
-p_t = TransientTrialFESpace(δp)  # Transient pressure space
-λ_t = TransientTrialFESpace(δλ)  # Transient Lagrange multiplier space
+u_t = TransientTrialFESpace(δu)
+p_t = TransientTrialFESpace(δp)
+X_t = MultiFieldFESpace([u_t, p_t])
 
-# Combine the transient spaces into a multi-field space
-X_t = MultiFieldFESpace([u_t, p_t, λ_t])
+# ============================================================================
+# RESIDUAL FORMULATION
+# ============================================================================
+# Stress tensor (plane strain)
+sigma(u) = 2 * mu_shear * symmetric_gradient(u) + lambda * tr(symmetric_gradient(u)) * one(TensorValue{2,2,Float64})
 
-
-function res_Ω(t, (u, p), (δu, δp)) 
-  # Volume terms (poroelasticity equations)
-  ∫( # order 4 integration terms
-    symmetric_gradient(δu) ⊙ sigma(u) +
-    δp * B * divergence(∂t(u)) - 
-    (B * divergence(δu) * p)
-   ) * dΩ_u +
-  ∫( # order 2 integration terms
-    δp * (1/M) * ∂t(p) -
-    ∇(δp) ⋅ (k_mu * ∇(p))
-   ) * dΩ_s
+function res_Ω(t, (u, p), (δu, δp))
+    ∫( # Order 4 terms
+        symmetric_gradient(δu) ⊙ sigma(u) +
+        δp * B * divergence(∂t(u)) -
+        (B * divergence(δu) * p)
+    ) * dΩ_u +
+    ∫( # Order 2 terms
+        δp * (1/M) * ∂t(p) -
+        ∇(δp) ⋅ (k_mu * ∇(p))
+    ) * dΩ_s
 end
 
-function res_Γ(t, (u, λ), (δu, δλ)) 
-  ∫(
-    # Lagrange multiplier terms for u_y = constant on top boundary
-    λ * ∇(δu ⋅ VectorValue(0.0, 1.0)) ⋅ VectorValue(1.0, 0.0) +
-    δλ * ∇(u ⋅ VectorValue(0.0, 1.0)) ⋅ VectorValue(1.0, 0.0)
-   ) * dΓ_top_u -
-  ∫(
-    δu ⋅ VectorValue(0.0, -F)  # Compressive traction
-   ) * dΓ_top_u
+function res_Γ(t, u, δu)
+    ∫( δu ⋅ VectorValue(0.0, -F) ) * dΓ_top_u  # Traction
 end
 
+res(t, (u, p), (δu, δp)) = res_Ω(t, (u, p), (δu, δp)) - res_Γ(t, u, δu)
 
-# Residual form for the nonlinear solver
-res(t, (u, p, λ), (δu, δp, δλ)) = res_Ω(t, (u, p), (δu, δp)) + res_Γ(t, (u, λ), (δu, δλ))
+# ============================================================================
+# INITIAL CONDITIONS
+# ============================================================================
+u0 = VectorValue(0.0, 0.0)
+p0 = 10.0
+uh0 = interpolate_everywhere([u0, p0], X_t(0.0))
 
 # ============================================================================
 # TRANSIENT PROBLEM SETUP
 # ============================================================================
-# Create the transient finite element operator from the residual
 op = TransientFEOperator(res, X_t, Y)
 
 # ============================================================================
@@ -231,11 +195,6 @@ nls = NLSolver(ls, method=:newton, iterations=10, show_trace=false)
          # Note: θ=0.5 would be Crank-Nicolson, θ=0.0 would be forward Euler
 ode_solver = ThetaMethod(nls, Δt, θ)
 
-# ============================================================================
-# INITIAL SOLUTION
-# ============================================================================
-# Interpolate the initial conditions onto the FE spaces
-uh0 = interpolate_everywhere([u0, p0, λ0], X_t(0.0))
 
 # ============================================================================
 # SOLVE THE TRANSIENT PROBLEM
@@ -254,7 +213,7 @@ sol = solve(ode_solver, op, t0, tF, uh0)
 # Create ParaView collection (.pvd file) for time-series visualization
 createpvd(joinpath(output_dir, "results")) do pvd
     # Save initial state (t=0)
-    u0_h, p0_h, λ0_h = uh0  # Extract displacement and pressure from initial solution
+    u0_h, p0_h = uh0  # Extract displacement and pressure from initial solution
     pvd[0.0] = createvtk(Ω, joinpath(output_dir, "results_0.vtu"), 
                          cellfields=["displacement"=>u0_h, "pressure"=>p0_h])
     
@@ -263,7 +222,7 @@ createpvd(joinpath(output_dir, "results")) do pvd
         println("Writing results for t = $tn")
         
         # Extract displacement and pressure from current solution
-        un_h, pn_h, λn_h = uhn
+        un_h, pn_h = uhn
         
         # Create VTK file for this time step with displacement and pressure fields
         pvd[tn] = createvtk(Ω, joinpath(output_dir, "results_$(tn).vtu"), 
