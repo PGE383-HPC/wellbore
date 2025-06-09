@@ -150,23 +150,29 @@ X_t = MultiFieldFESpace([u_t, p_t])
 # Stress tensor (plane strain)
 sigma(u) = 2 * mu_shear * symmetric_gradient(u) + lambda * tr(symmetric_gradient(u)) * one(TensorValue{2,2,Float64})
 
-function res_Ω(t, (u, p), (δu, δp))
+function m(t, (du, dp), (δu, δp))
+    ∫( # Order 4 terms
+        δp * B * divergence(du)
+     ) * dΩ_u +
+    ∫( # Order 2 terms
+        δp * (1/M) * dp 
+    ) * dΩ_s
+end
+
+function a(t, (u, p), (δu, δp))
     ∫( # Order 4 terms
         symmetric_gradient(δu) ⊙ sigma(u) +
-        δp * B * divergence(∂t(u)) -
         (B * divergence(δu) * p)
     ) * dΩ_u +
     ∫( # Order 2 terms
-        δp * (1/M) * ∂t(p) -
         ∇(δp) ⋅ (k_mu * ∇(p))
     ) * dΩ_s
 end
 
-function res_Γ(t, u, δu)
+function l(t, (δu, δp))
     ∫( δu ⋅ VectorValue(0.0, -F) ) * dΓ_top_u  # Traction
 end
 
-res(t, (u, p), (δu, δp)) = res_Ω(t, (u, p), (δu, δp)) - res_Γ(t, u, δu)
 
 # ============================================================================
 # INITIAL CONDITIONS
@@ -178,7 +184,7 @@ uh0 = interpolate_everywhere([u0, p0], X_t(0.0))
 # ============================================================================
 # TRANSIENT PROBLEM SETUP
 # ============================================================================
-op = TransientFEOperator(res, X_t, Y)
+op = TransientLinearFEOperator((a, m), l, X_t, Y, constant_forms=(true, true))
 
 # ============================================================================
 # SOLVER CONFIGURATION
