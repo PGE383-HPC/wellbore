@@ -28,15 +28,15 @@ using GridapGmsh            # For Gmsh mesh integration
 E = 1.0e6         # Young's modulus (Pa)
 nu = 0.2          # Poisson's ratio
 B = 0.8           # Biot coefficient
-M = 1.0e9         # Biot modulus (Pa)
-k = 1.0e-3        # Permeability (m^2)
+M = 1.0e8         # Biot modulus (Pa)
+k = 1.0e-12        # Permeability (m^2)
 mu = 1.0e-3       # Fluid viscosity (Pa·s)
 
 # Loading conditions
 F = 1.0e3         # Compressive traction (Pa) at top boundary
 
 # Time stepping parameters
-T = 10.0          # Final time (s)
+T = 1.0          # Final time (s)
 num_steps = 100   # Number of time steps
 dt = T / num_steps # Time step size (s)
 
@@ -57,20 +57,23 @@ if !isdir(output_dir)
     mkdir(output_dir)
 end
 
-# Load Gmsh mesh
-model = GmshDiscreteModel("square.msh")
+# Define internal grid using CartesianDiscreteModel
+n = 20  # Number of cells per direction (matching Gmsh Transfinite setting)
+domain = (0.0, 1.0, 0.0, 1.0)  # x-min, x-max, y-min, y-max
+partition = (n, n)  # Number of cells in x and y directions
+model = CartesianDiscreteModel(domain, partition)
 
-# Define boundary tags
-dirichlet_tags = ["top", "bottom", "left", "right"]
+# Assign boundary tags
+labeling = get_face_labeling(model)
+add_tag_from_tags!(labeling, "corner",[1])
+add_tag_from_tags!(labeling, "bottom", [1,2,5])     # Bottom boundary (face with min y)
+add_tag_from_tags!(labeling, "top", [3,4,6])      # Top boundary (face with max y)
+add_tag_from_tags!(labeling, "left",[1,3,7])
+add_tag_from_tags!(labeling, "right",[2,4,8])
 
 # Export mesh for visualization
 writevtk(model, "model")
 
-# Verify boundary entities
-labels = get_face_labeling(model)
-for tag in dirichlet_tags
-    println("Entities tagged as $tag: ", findall(labels.tag_to_name .== tag))
-end
 
 # ============================================================================
 # DOMAIN AND INTEGRATION SETUP
@@ -88,6 +91,9 @@ dΩ_s = Measure(Ω, degree_s)
 Γ_top = BoundaryTriangulation(model, tags="top")
 dΓ_top_u = Measure(Γ_top, degree_u)
 
+# Right boundary for constraint 
+Γ_right = BoundaryTriangulation(model, tags="right")
+
 # ============================================================================
 # FINITE ELEMENT SPACES
 # ============================================================================
@@ -101,8 +107,8 @@ reffe_s = ReferenceFE(lagrangian, Float64, order_s)
 
 # Base displacement space (no Dirichlet conditions yet)
 δu_base = TestFESpace(model, reffe_u, conformity=:H1,
-                      dirichlet_tags=["left", "bottom"],
-                      dirichlet_masks=[(true, false), (false, true)])
+                      dirichlet_tags=["corner", "left", "bottom"],
+                       dirichlet_masks=[(true, true), (true, false), (false, true)])
 
 # Top boundary node IDs for constraint
 cell_node_ids = get_cell_node_ids(Γ_top)
@@ -128,10 +134,34 @@ else
     δu = FESpaceWithLinearConstraints(sDOF_to_dof, sDOF_to_dofs, sDOF_to_coeffs, δu_base)
 end
 
+# Right boundary node IDs for constraint
+cell_node_ids = get_cell_node_ids(Γ_right)
+boundary_node_ids = sort(unique(vcat(cell_node_ids...)))
+master_dof = boundary_node_ids[1]  # u_x of first node
+slave_dofs = [2*j for j in boundary_node_ids[1:end]]  # u_x of other nodes
+
+# Constraint setup
+if length(slave_dofs) == 0
+    # No constraints needed if only one node
+    δu = δu
+else
+    # Define constraints: each slave DOF equals master_dof
+    data_dofs = [master_dof for _ in slave_dofs]
+    ptrs_dofs = collect(1:length(slave_dofs)+1)
+    sDOF_to_dofs = Table(data_dofs, ptrs_dofs)
+    data_coeffs = [1.0 for _ in slave_dofs]
+    ptrs_coeffs = collect(1:length(slave_dofs)+1)
+    sDOF_to_coeffs = Table(data_coeffs, ptrs_coeffs)
+    sDOF_to_dof = Int[]  # Empty, using sDOF_to_dofs instead
+
+    # Constrained space
+    δu = FESpaceWithLinearConstraints(sDOF_to_dof, sDOF_to_dofs, sDOF_to_coeffs, δu)
+end
+
 u = TrialFESpace(δu, _ -> VectorValue(0.0, 0.0))
 
 # Pressure space
-δp = TestFESpace(model, reffe_s, conformity=:H1, dirichlet_tags=["left", "right"])
+δp = TestFESpace(model, reffe_s, conformity=:H1, dirichlet_tags=["top"])
 p = TrialFESpace(δp, 0.0)
 
 # Multi-field space
@@ -161,7 +191,7 @@ end
 
 function a(t, (u, p), (δu, δp))
     ∫( # Order 4 terms
-        symmetric_gradient(δu) ⊙ sigma(u) +
+        symmetric_gradient(δu) ⊙ sigma(u) -
         (B * divergence(δu) * p)
     ) * dΩ_u +
     ∫( # Order 2 terms
@@ -178,7 +208,7 @@ end
 # INITIAL CONDITIONS
 # ============================================================================
 u0 = VectorValue(0.0, 0.0)
-p0 = 10.0
+p0 = 1000.0
 uh0 = interpolate_everywhere([u0, p0], X_t(0.0))
 
 # ============================================================================
@@ -192,14 +222,11 @@ op = TransientLinearFEOperator((a, m), l, X_t, Y, constant_forms=(true, true))
 # Set up the linear solver (for solving linear systems within Newton iterations)
 ls = LUSolver()  # Direct LU decomposition solver
 
-# Set up the nonlinear solver (Newton's method)
-nls = NLSolver(ls, method=:newton, iterations=10, show_trace=false)
-
 # Create the ODE solver with the nonlinear solver
 Δt = dt  # Time step size
 θ = 1.0  # Backward Euler scheme (θ=1.0 is fully implicit)
          # Note: θ=0.5 would be Crank-Nicolson, θ=0.0 would be forward Euler
-ode_solver = ThetaMethod(nls, Δt, θ)
+ode_solver = ThetaMethod(ls, Δt, θ)
 
 
 # ============================================================================
