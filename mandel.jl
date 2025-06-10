@@ -69,7 +69,7 @@ add_tag_from_tags!(labeling, "corner",[1])
 add_tag_from_tags!(labeling, "bottom", [1,2,5])     # Bottom boundary (face with min y)
 add_tag_from_tags!(labeling, "top", [3,4,6])      # Top boundary (face with max y)
 add_tag_from_tags!(labeling, "left",[1,3,7])
-add_tag_from_tags!(labeling, "right",[2,4,8])
+add_tag_from_tags!(labeling, "right",[2,8])
 
 # Export mesh for visualization
 writevtk(model, "model")
@@ -106,9 +106,10 @@ reffe_u = ReferenceFE(lagrangian, VectorValue{2,Float64}, order_u)
 reffe_s = ReferenceFE(lagrangian, Float64, order_s)
 
 # Base displacement space (no Dirichlet conditions yet)
-δu_base = TestFESpace(model, reffe_u, conformity=:H1,
-                      dirichlet_tags=["corner", "left", "bottom"],
-                       dirichlet_masks=[(true, true), (true, false), (false, true)])
+δu = TestFESpace(model, reffe_u, conformity=:H1,
+                 dirichlet_tags=["corner", "left", "bottom"],
+                 dirichlet_masks=[(true, true), (true, false), (false, true)])
+
 
 # Top boundary node IDs for constraint
 cell_node_ids = get_cell_node_ids(Γ_top)
@@ -119,7 +120,7 @@ slave_dofs = [2*j for j in boundary_node_ids[2:end]]  # u_y of other nodes
 # Constraint setup
 if length(slave_dofs) == 0
     # No constraints needed if only one node
-    δu = δu_base
+    δu = δu
 else
     # Define constraints: each slave DOF equals master_dof
     data_dofs = [master_dof for _ in slave_dofs]
@@ -131,7 +132,7 @@ else
     sDOF_to_dof = Int[]  # Empty, using sDOF_to_dofs instead
 
     # Constrained space
-    δu = FESpaceWithLinearConstraints(sDOF_to_dof, sDOF_to_dofs, sDOF_to_coeffs, δu_base)
+    δu = FESpaceWithLinearConstraints(sDOF_to_dof, sDOF_to_dofs, sDOF_to_coeffs, δu)
 end
 
 # Right boundary node IDs for constraint
@@ -199,8 +200,11 @@ function a(t, (u, p), (δu, δp))
     ) * dΩ_s
 end
 
+pt = Point(0.0, 1.0)
+dΔ = DiracDelta(model; tags="top")
+
 function l(t, (δu, δp))
-    ∫( δu ⋅ VectorValue(0.0, -F) ) * dΓ_top_u  # Traction
+    ∫( δu ⋅ VectorValue(0.0, -F) ) * dΔ  # Point force
 end
 
 
