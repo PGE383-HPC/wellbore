@@ -111,41 +111,50 @@ reffe_s = ReferenceFE(lagrangian, Float64, order_s)
                  dirichlet_masks=[(true, true), (true, false), (false, true)])
 
 
-function get_dof(geometry_id, model, test_space, reffe_order, component=2)
-    # Extract the identifier of the vertex located at the upper left corner of the domain
+function get_dofs(geometry_id, model, test_space, reffe_order, component=2)
+    # Extract the identifiers of the mesh edges associated with geometry_id 
     labels = get_face_labeling(model)
-    mesh_vertex_id = findall(x->x==geometry_id, labels.d_to_dface_to_entity[1])[1]
+    mesh_edges_ids = findall(x->x==geometry_id, labels.d_to_dface_to_entity[2])
 
-    # Extract the identifier of the cell that touches the upper left corner vertex
+    # Extract the identifier of the cells that touch those edges
     topo = get_grid_topology(model)
-    cells_around_vertices = Gridap.Geometry.get_faces(topo, 0, 2)
-    cell_id = cells_around_vertices[mesh_vertex_id][1]
+    cells_touching_edges = Gridap.Geometry.get_faces(topo, 1, 2)
+    cells_ids = cells_touching_edges[mesh_edges_ids]
 
-    # Extract the local vertex id of the upper left corner vertex in the cell
-    cells_vertices = Gridap.Geometry.get_faces(topo, 2, 0)
-    cell_vertices  = cells_vertices[cell_id]
-    local_vertex_id = findall(x->x==mesh_vertex_id, cell_vertices)[1]
+    # Extract the local (to cell) edge id for each edge the cell that touches the geometry_id
+    cells_edges = Gridap.Geometry.get_faces(topo, 2, 1)
+    cells_edges  = cells_edges[cells_ids.data]
+    local_edge_ids =  [ findfirst(x -> x.== mesh_edges_ids[i], cells_edges[i]) for i in 1:length(mesh_edges_ids) ]
 
-    # Extract the y-component DoF Id owned by the vertex located at the upper left corner of the domain
+    # Get the global dofs associated with the cells that touch geometry_id 
     cells_dof_ids = get_cell_dof_ids(test_space)
-    cell_dof_ids = cells_dof_ids[cell_id]
+    cell_dof_ids = cells_dof_ids[cells_ids.data]
+
+    # Get the local (to cell) dofs for each cell that touches geometry_id
     lag_ref_fe = Gridap.ReferenceFEs.LagrangianRefFE(VectorValue{2,Float64}, QUAD, reffe_order)
-    face_own_dofs = Gridap.ReferenceFEs.get_face_own_dofs(lag_ref_fe)
-    local_dof_ids_own_dofs = face_own_dofs[local_vertex_id]
-    dof_ids_own_dofs = cell_dof_ids[local_dof_ids_own_dofs]
-    dof_ids_own_dofs[component]
+    face_own_dofs = Gridap.ReferenceFEs.get_face_dofs(lag_ref_fe)[5:8]
+    local_dof_ids =  [face_own_dofs[i] for i in local_edge_ids]
+    
+    # Get the global dof ids corresponding to the local dof ids
+    global_dofs_ids = [cells_dof_ids[i][local_dof_ids[i]] for i in 1:length(local_dof_ids)]
+
+    # Get the components (1 = "x", 2 = "y") make them unique and return
+    component_dof_ids = [ i[component:2:end] for i in global_dofs_ids ]
+    unique(vcat(component_dof_ids...))
 end
 
 
-# Top left corner y dof 
-master_dof = get_dof(3, model, δu, 2, 2) 
+# Top edges dofs (top is 6)
+constrainted_dofs = get_dofs(6, model, δu, order_u, 2) 
 # Top right corner y dof 
-slave_dof = get_dof(4, model, δu, 2, 2)  # u_y of other nodes
+master_dof = constrainted_dofs[1]
+# The rest of the top edge dofs
+slave_dofs = constrainted_dofs[2:end]
 
 # Constraint setup
-sDOF_to_dof = [slave_dof] 
-sDOF_to_dofs = Table([[master_dof]])
-sDOF_to_coeffs = Table([[1.0]])
+sDOF_to_dof = slave_dofs
+sDOF_to_dofs = Table([[master_dof] for _ in 1:length(slave_dofs)])
+sDOF_to_coeffs = Table([[1.0] for _ in 1:length(slave_dofs)])
 
 # Constrained space
 δu = FESpaceWithLinearConstraints(sDOF_to_dof, sDOF_to_dofs, sDOF_to_coeffs, δu)
@@ -258,3 +267,4 @@ end
 
 # Print completion message
 println("Plane strain simulation completed! Results saved in the '$output_dir' directory.")
+
