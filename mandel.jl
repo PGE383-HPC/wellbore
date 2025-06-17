@@ -69,7 +69,7 @@ add_tag_from_tags!(labeling, "corner",[1])
 add_tag_from_tags!(labeling, "bottom", [1,2,5])     # Bottom boundary (face with min y)
 add_tag_from_tags!(labeling, "top", [3,4,6])      # Top boundary (face with max y)
 add_tag_from_tags!(labeling, "left",[1,3,7])
-add_tag_from_tags!(labeling, "right",[2,8])
+add_tag_from_tags!(labeling, "right",[2,4,8])
 
 # Export mesh for visualization
 writevtk(model, "model")
@@ -111,58 +111,49 @@ reffe_s = ReferenceFE(lagrangian, Float64, order_s)
                  dirichlet_masks=[(true, true), (true, false), (false, true)])
 
 
-# Top boundary node IDs for constraint
-cell_node_ids = get_cell_node_ids(Γ_top)
-boundary_node_ids = sort(unique(vcat(cell_node_ids...)))
-master_dof = 2 * boundary_node_ids[1]  # u_y of first node
-slave_dofs = [2*j for j in boundary_node_ids[2:end]]  # u_y of other nodes
+function get_dof(geometry_id, model, test_space, reffe_order, component=2)
+    # Extract the identifier of the vertex located at the upper left corner of the domain
+    labels = get_face_labeling(model)
+    mesh_vertex_id = findall(x->x==geometry_id, labels.d_to_dface_to_entity[1])[1]
 
-# Constraint setup
-if length(slave_dofs) == 0
-    # No constraints needed if only one node
-    δu = δu
-else
-    # Define constraints: each slave DOF equals master_dof
-    data_dofs = [master_dof for _ in slave_dofs]
-    ptrs_dofs = collect(1:length(slave_dofs)+1)
-    sDOF_to_dofs = Table(data_dofs, ptrs_dofs)
-    data_coeffs = [1.0 for _ in slave_dofs]
-    ptrs_coeffs = collect(1:length(slave_dofs)+1)
-    sDOF_to_coeffs = Table(data_coeffs, ptrs_coeffs)
-    sDOF_to_dof = Int[]  # Empty, using sDOF_to_dofs instead
+    # Extract the identifier of the cell that touches the upper left corner vertex
+    topo = get_grid_topology(model)
+    cells_around_vertices = Gridap.Geometry.get_faces(topo, 0, 2)
+    cell_id = cells_around_vertices[mesh_vertex_id][1]
 
-    # Constrained space
-    δu = FESpaceWithLinearConstraints(sDOF_to_dof, sDOF_to_dofs, sDOF_to_coeffs, δu)
+    # Extract the local vertex id of the upper left corner vertex in the cell
+    cells_vertices = Gridap.Geometry.get_faces(topo, 2, 0)
+    cell_vertices  = cells_vertices[cell_id]
+    local_vertex_id = findall(x->x==mesh_vertex_id, cell_vertices)[1]
+
+    # Extract the y-component DoF Id owned by the vertex located at the upper left corner of the domain
+    cells_dof_ids = get_cell_dof_ids(test_space)
+    cell_dof_ids = cells_dof_ids[cell_id]
+    lag_ref_fe = Gridap.ReferenceFEs.LagrangianRefFE(VectorValue{2,Float64}, QUAD, reffe_order)
+    face_own_dofs = Gridap.ReferenceFEs.get_face_own_dofs(lag_ref_fe)
+    local_dof_ids_own_dofs = face_own_dofs[local_vertex_id]
+    dof_ids_own_dofs = cell_dof_ids[local_dof_ids_own_dofs]
+    dof_ids_own_dofs[component]
 end
 
-# Right boundary node IDs for constraint
-cell_node_ids = get_cell_node_ids(Γ_right)
-boundary_node_ids = sort(unique(vcat(cell_node_ids...)))
-master_dof = boundary_node_ids[1]  # u_x of first node
-slave_dofs = [2*j for j in boundary_node_ids[1:end]]  # u_x of other nodes
+
+# Top left corner y dof 
+master_dof = get_dof(3, model, δu, 2, 2) 
+# Top right corner y dof 
+slave_dof = get_dof(4, model, δu, 2, 2)  # u_y of other nodes
 
 # Constraint setup
-if length(slave_dofs) == 0
-    # No constraints needed if only one node
-    δu = δu
-else
-    # Define constraints: each slave DOF equals master_dof
-    data_dofs = [master_dof for _ in slave_dofs]
-    ptrs_dofs = collect(1:length(slave_dofs)+1)
-    sDOF_to_dofs = Table(data_dofs, ptrs_dofs)
-    data_coeffs = [1.0 for _ in slave_dofs]
-    ptrs_coeffs = collect(1:length(slave_dofs)+1)
-    sDOF_to_coeffs = Table(data_coeffs, ptrs_coeffs)
-    sDOF_to_dof = Int[]  # Empty, using sDOF_to_dofs instead
+sDOF_to_dof = [slave_dof] 
+sDOF_to_dofs = Table([[master_dof]])
+sDOF_to_coeffs = Table([[1.0]])
 
-    # Constrained space
-    δu = FESpaceWithLinearConstraints(sDOF_to_dof, sDOF_to_dofs, sDOF_to_coeffs, δu)
-end
+# Constrained space
+δu = FESpaceWithLinearConstraints(sDOF_to_dof, sDOF_to_dofs, sDOF_to_coeffs, δu)
 
 u = TrialFESpace(δu, _ -> VectorValue(0.0, 0.0))
 
 # Pressure space
-δp = TestFESpace(model, reffe_s, conformity=:H1, dirichlet_tags=["top"])
+δp = TestFESpace(model, reffe_s, conformity=:H1, dirichlet_tags=["right"])
 p = TrialFESpace(δp, 0.0)
 
 # Multi-field space
@@ -200,11 +191,8 @@ function a(t, (u, p), (δu, δp))
     ) * dΩ_s
 end
 
-pt = Point(0.0, 1.0)
-dΔ = DiracDelta(model; tags="top")
-
 function l(t, (δu, δp))
-    ∫( δu ⋅ VectorValue(0.0, -F) ) * dΔ  # Point force
+    ∫( δu ⋅ VectorValue(0.0, -F) ) * dΓ_top_u
 end
 
 
