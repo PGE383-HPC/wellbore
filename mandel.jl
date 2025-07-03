@@ -58,17 +58,17 @@ if !isdir(output_dir)
 end
 
 # Define internal grid using CartesianDiscreteModel
-n = 20  # Number of cells per direction (matching Gmsh Transfinite setting)
+n = 1  # Number of cells per direction 
 domain = (0.0, 1.0, 0.0, 1.0)  # x-min, x-max, y-min, y-max
-partition = (n, n)  # Number of cells in x and y directions
+partition = (4, 4)  # Number of cells in x and y directions
 model = CartesianDiscreteModel(domain, partition)
 
 # Assign boundary tags
 labeling = get_face_labeling(model)
 add_tag_from_tags!(labeling, "corner",[1])
 add_tag_from_tags!(labeling, "bottom", [1,2,5])     # Bottom boundary (face with min y)
-add_tag_from_tags!(labeling, "top", [3,4,6])      # Top boundary (face with max y)
 add_tag_from_tags!(labeling, "left",[1,3,7])
+add_tag_from_tags!(labeling, "top", [3,4,6])      # Top boundary (face with max y)
 add_tag_from_tags!(labeling, "right",[2,4,8])
 
 # Export mesh for visualization
@@ -91,7 +91,7 @@ dΩ_s = Measure(Ω, degree_s)
 Γ_top = BoundaryTriangulation(model, tags="top")
 dΓ_top_u = Measure(Γ_top, degree_u)
 
-# Right boundary for constraint 
+# Right boundary for constant pressure
 Γ_right = BoundaryTriangulation(model, tags="right")
 
 # ============================================================================
@@ -111,53 +111,57 @@ reffe_s = ReferenceFE(lagrangian, Float64, order_s)
                  dirichlet_masks=[(true, true), (true, false), (false, true)])
 
 
-function get_dofs(geometry_id, model, test_space, reffe_order, component=2)
-    # Extract the identifiers of the mesh edges associated with geometry_id 
-    labels = get_face_labeling(model)
-    mesh_edges_ids = findall(x->x==geometry_id, labels.d_to_dface_to_entity[2])
-
-    # Extract the identifier of the cells that touch those edges
-    topo = get_grid_topology(model)
-    cells_touching_edges = Gridap.Geometry.get_faces(topo, 1, 2)
-    cells_ids = cells_touching_edges[mesh_edges_ids]
-
-    # Extract the local (to cell) edge id for each edge the cell that touches the geometry_id
-    cells_edges = Gridap.Geometry.get_faces(topo, 2, 1)
-    cells_edges  = cells_edges[cells_ids.data]
-    local_edge_ids =  [ findfirst(x -> x.== mesh_edges_ids[i], cells_edges[i]) for i in 1:length(mesh_edges_ids) ]
-
-    # Get the global dofs associated with the cells that touch geometry_id 
-    cells_dof_ids = get_cell_dof_ids(test_space)
-    cell_dof_ids = cells_dof_ids[cells_ids.data]
-
-    # Get the local (to cell) dofs for each cell that touches geometry_id
-    lag_ref_fe = Gridap.ReferenceFEs.LagrangianRefFE(VectorValue{2,Float64}, QUAD, reffe_order)
-    face_own_dofs = Gridap.ReferenceFEs.get_face_dofs(lag_ref_fe)[5:8]
-    local_dof_ids =  [face_own_dofs[i] for i in local_edge_ids]
-    
-    # Get the global dof ids corresponding to the local dof ids
-    global_dofs_ids = [cells_dof_ids[i][local_dof_ids[i]] for i in 1:length(local_dof_ids)]
-
-    # Get the components (1 = "x", 2 = "y") make them unique and return
-    component_dof_ids = [ i[component:2:end] for i in global_dofs_ids ]
-    unique(vcat(component_dof_ids...))
-end
-
-
-# Top edges dofs (top is 6)
-constrainted_dofs = get_dofs(6, model, δu, order_u, 2) 
-# Top right corner y dof 
-master_dof = constrainted_dofs[1]
-# The rest of the top edge dofs
-slave_dofs = constrainted_dofs[2:end]
-
-# Constraint setup
-sDOF_to_dof = slave_dofs
-sDOF_to_dofs = Table([[master_dof] for _ in 1:length(slave_dofs)])
-sDOF_to_coeffs = Table([[1.0] for _ in 1:length(slave_dofs)])
-
-# Constrained space
-δu = FESpaceWithLinearConstraints(sDOF_to_dof, sDOF_to_dofs, sDOF_to_coeffs, δu)
+# function get_dofs(geometry_id, model, test_space, reffe_order, component=2)
+#     # Extract the identifiers of the mesh edges associated with geometry_id 
+#     labels = get_face_labeling(model)
+#     mesh_edges_ids = findall(x->x==geometry_id, labels.d_to_dface_to_entity[2])
+#
+#     # Extract the identifier of the cells that touch those edges
+#     topo = get_grid_topology(model)
+#     cells_touching_edges = Gridap.Geometry.get_faces(topo, 1, 2)
+#     cells_ids = cells_touching_edges[mesh_edges_ids]
+#
+#     # Extract the local (to cell) edge id for each edge the cell that touches the geometry_id
+#     cells_edges = Gridap.Geometry.get_faces(topo, 2, 1)
+#     cells_edges  = cells_edges[cells_ids.data]
+#     local_edge_ids =  [ findfirst(x -> x.== ids, cells_edges[i]) 
+#       for (i, ids) in enumerate(mesh_edges_ids) ]
+#
+#     # Get the global dofs associated with the cells that touch geometry_id 
+#     cells_dof_ids = get_cell_dof_ids(test_space)
+#     # Reshape to keep x,y dofs together
+#     cells_dof_ids = cells_dof_ids[cells_ids.data]
+#
+#     # Get the local (to cell) dofs for each cell that touches geometry_id
+#     lag_ref_fe = Gridap.ReferenceFEs.LagrangianRefFE(VectorValue{2,Float64}, QUAD, reffe_order)
+#     face_own_dofs = Gridap.ReferenceFEs.get_face_dofs(lag_ref_fe)[5:8]
+#     local_dof_ids =  [face_own_dofs[ids] for ids in local_edge_ids]
+#     
+#     # Get the global dof ids corresponding to the local_dof_ids
+#     global_dofs_ids = [cells_dof_ids[i][ids] for (i, ids) in enumerate(local_dof_ids)]
+#
+#     # Get the components (1 = "x", 2 = "y") make them unique and return
+#     # component = 2
+#     component_dof_ids = [ item[component:2:end] for item in global_dofs_ids ]
+#     unique(vcat(component_dof_ids...))
+# end
+#
+#
+# # Top edges dofs (top is 6)
+# constrained_dofs = get_dofs(6, model, δu, order_u, 2) 
+# # Top right corner y dof 
+# master_dof = constrained_dofs[1]
+# # The rest of the top edge dofs
+# slave_dofs = constrained_dofs[2:end]
+#
+# # Constraint setup
+# sDOF_to_dof = slave_dofs
+# sDOF_to_dof = [35 94]
+# sDOF_to_dofs = Table([[master_dof] for _ in 1:length(slave_dofs)])
+# sDOF_to_coeffs = Table([[1.0] for _ in 1:length(slave_dofs)])
+#
+# # Constrained space
+# δu = FESpaceWithLinearConstraints(sDOF_to_dof, sDOF_to_dofs, sDOF_to_coeffs, δu)
 
 u = TrialFESpace(δu, _ -> VectorValue(0.0, 0.0))
 
@@ -178,31 +182,76 @@ X_t = MultiFieldFESpace([u_t, p_t])
 # ============================================================================
 # RESIDUAL FORMULATION
 # ============================================================================
+# Penalty parameter
+α = 1.0e8  # Adjust based on convergence
+
 # Stress tensor (plane strain)
 sigma(u) = 2 * mu_shear * symmetric_gradient(u) + lambda * tr(symmetric_gradient(u)) * one(TensorValue{2,2,Float64})
 
-function m(t, (du, dp), (δu, δp))
-    ∫( # Order 4 terms
-        δp * B * divergence(du)
-     ) * dΩ_u +
-    ∫( # Order 2 terms
-        δp * (1/M) * dp 
-    ) * dΩ_s
-end
+# Residual function for nonlinear problem
+function residual(t, (u, p), (δu, δp))
+    # Mass residual
+    mass_term = ∫( 
+        δp * B * divergence(∂t(u)) +
+        δp * (1/M) * ∂t(u)
+    ) * dΩ_u
 
-function a(t, (u, p), (δu, δp))
-    ∫( # Order 4 terms
+    # Compute full gradients
+    # grad_u = ∇(u)    # TensorValue{2,2} for u
+    # grad_δu = ∇(δu)  # TensorValue{2,2} for δu
+
+    # Basis vector for x-direction
+    # e_x = VectorValue(1.0, 0.0)
+    #
+    # Extract ∂u_y/∂x and ∂δu_y/∂x using dot products
+    # Gradient of u_y is the second row of ∇u, projected onto e_x
+    # ∂u_y_∂x = (grad_u ⋅ VectorValue(0.0, 1.0)) ⋅ e_x  # ∂u_y/∂x
+    # ∂δu_y_∂x = (grad_δu ⋅ VectorValue(0.0, 1.0)) ⋅ e_x  # ∂δu_y/∂x
+
+    # Stiffness residual (including penalty)
+    stiffness_term = ∫( 
         symmetric_gradient(δu) ⊙ sigma(u) -
-        (B * divergence(δu) * p)
-    ) * dΩ_u +
-    ∫( # Order 2 terms
+        (B * divergence(δu) * p) +
         ∇(δp) ⋅ (k_mu * ∇(p))
-    ) * dΩ_s
+    ) * dΩ_u # +
+    # ∫( 
+    #     α * (∂u_y_∂x * ∂δu_y_∂x)
+    # ) * dΓ_top_u
+
+    # Load term
+    load_term = ∫( δu ⋅ VectorValue(0.0, -F) ) * dΓ_top_u
+
+    mass_term + stiffness_term - load_term
 end
 
-function l(t, (δu, δp))
-    ∫( δu ⋅ VectorValue(0.0, -F) ) * dΓ_top_u
-end
+# # ============================================================================
+# # RESIDUAL FORMULATION
+# # ============================================================================
+# # Stress tensor (plane strain)
+# sigma(u) = 2 * mu_shear * symmetric_gradient(u) + lambda * tr(symmetric_gradient(u)) * one(TensorValue{2,2,Float64})
+#
+# function m(t, (du, dp), (δu, δp))
+#     ∫( # Order 4 terms
+#         δp * B * divergence(du)
+#      ) * dΩ_u +
+#     ∫( # Order 2 terms
+#         δp * (1/M) * dp 
+#     ) * dΩ_s
+# end
+#
+# function a(t, (u, p), (δu, δp))
+#     ∫( # Order 4 terms
+#         symmetric_gradient(δu) ⊙ sigma(u) -
+#         (B * divergence(δu) * p)
+#     ) * dΩ_u +
+#     ∫( # Order 2 terms
+#         ∇(δp) ⋅ (k_mu * ∇(p))
+#     ) * dΩ_s
+# end
+#
+# function l(t, (δu, δp))
+#     ∫( δu ⋅ VectorValue(0.0, -F) ) * dΓ_top_u
+# end
 
 
 # ============================================================================
@@ -212,22 +261,42 @@ u0 = VectorValue(0.0, 0.0)
 p0 = 1000.0
 uh0 = interpolate_everywhere([u0, p0], X_t(0.0))
 
+
+
 # ============================================================================
 # TRANSIENT PROBLEM SETUP
 # ============================================================================
-op = TransientLinearFEOperator((a, m), l, X_t, Y, constant_forms=(true, true))
+# Nonlinear operator
+op = TransientFEOperator(residual, X_t, Y)
 
 # ============================================================================
 # SOLVER CONFIGURATION
 # ============================================================================
 # Set up the linear solver (for solving linear systems within Newton iterations)
 ls = LUSolver()  # Direct LU decomposition solver
+# Nonlinear solver
+nls = NLSolver(
+    ls,
+    show_trace=true,
+    method=:newton,
+    iterations=10,
+    tolerance=1e-6
+)
+
+# ============================================================================
+# TRANSIENT PROBLEM SETUP
+# ============================================================================
+# op = TransientLinearFEOperator((a, m), l, X_t, Y, constant_forms=(true, true))
+
+# ============================================================================
+# SOLVER CONFIGURATION
+# ============================================================================
 
 # Create the ODE solver with the nonlinear solver
 Δt = dt  # Time step size
 θ = 1.0  # Backward Euler scheme (θ=1.0 is fully implicit)
          # Note: θ=0.5 would be Crank-Nicolson, θ=0.0 would be forward Euler
-ode_solver = ThetaMethod(ls, Δt, θ)
+ode_solver = ThetaMethod(nls, Δt, θ)
 
 
 # ============================================================================
